@@ -36,6 +36,7 @@ import com.michelin.kafkactl.model.Resource;
 import com.michelin.kafkactl.property.KafkactlProperties;
 import com.michelin.kafkactl.service.ApiResourcesService;
 import com.michelin.kafkactl.service.ConfigService;
+import com.michelin.kafkactl.service.FileService;
 import com.michelin.kafkactl.service.FormatService;
 import com.michelin.kafkactl.service.LoginService;
 import com.michelin.kafkactl.service.ResourceService;
@@ -78,6 +79,9 @@ class ApplyTest {
 
     @Mock
     Kafkactl kafkactl;
+
+    @Mock
+    FileService fileService;
 
     @InjectMocks
     Apply apply;
@@ -429,5 +433,53 @@ class ApplyTest {
                 sw.toString()
                         .contains(
                                 "Cannot open schema file src/test/resources/not-exist.avsc. Schema path must be relative to the CLI."));
+    }
+
+    @Test
+    void shouldApplyResourcesInCorrectOrder() {
+        when(configService.isCurrentContextValid()).thenReturn(true);
+        when(loginService.doAuthenticate(any(), anyBoolean())).thenReturn(true);
+        when(kafkactlProperties.getCurrentNamespace()).thenReturn("demo");
+
+        doCallRealMethod().when(apiResourcesService).getResourceDefinitionByKind(any());
+        doCallRealMethod().when(fileService).computeYamlFileList(any(), anyBoolean());
+        doCallRealMethod().when(fileService).parseResourceListFromFiles(any());
+        doCallRealMethod().when(resourceService).parseResources(any(), anyBoolean(), any());
+        doCallRealMethod().when(resourceService).prepareResources(any(), any());
+        apply.setResourceService(resourceService);
+
+        resourceService.setFileService(new FileService());
+        // Mock apply to produce output in order resources are processed
+        when(resourceService.apply(any(), any(), any(), anyBoolean(), any())).thenAnswer(invocation -> {
+            Resource resource = invocation.getArgument(2);
+            CommandLine.Model.CommandSpec spec = invocation.getArgument(4);
+            spec.commandLine()
+                    .getOut()
+                    .println("Applied \"" + resource.getMetadata().getName() + "\"");
+            return HttpResponse.ok(resource);
+        });
+
+        CommandLine cmd = new CommandLine(apply);
+        StringWriter sw = new StringWriter();
+        cmd.setOut(new PrintWriter(sw));
+
+        int code = cmd.execute("-f", "src/test/resources/resource_service/resources-unordered.yml");
+
+        String output = sw.toString();
+        System.out.println("Exit code: " + code);
+        System.out.println("Output: [" + output + "]");
+        assertEquals(0, code);
+
+        // Verify correct order by checking positions of resource names in output
+        int demoPos = output.indexOf("\"demo\"");
+        int roleBinding1Pos = output.indexOf("\"myRoleBinding1\"");
+        int aclPos = output.indexOf("\"acl-topic-schema\"");
+        int schemaPos = output.indexOf("\"demoPrefix.topic_64-value\"");
+        int topicPos = output.indexOf("\"demoPrefix.topic_64\"");
+
+        assertTrue(demoPos < roleBinding1Pos, "Namespace should come before RoleBinding");
+        assertTrue(roleBinding1Pos < aclPos, "RoleBinding should come before ACL");
+        assertTrue(aclPos < schemaPos, "ACL should come before Schema");
+        assertTrue(schemaPos < topicPos, "Schema should come before Topic");
     }
 }
